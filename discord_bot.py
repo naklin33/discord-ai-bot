@@ -14,6 +14,7 @@ import feedparser
 import datetime
 import base64
 import re
+import json
 
 load_dotenv()
 
@@ -25,6 +26,55 @@ WEATHER_CITY = os.getenv("WEATHER_CITY", "Kaohsiung")
 
 # 台灣時區 UTC+8
 TAIWAN_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+# 用戶偏好檔案
+USERS_FILE = "users.json"
+
+
+# ── 用戶偏好管理 ──────────────────────────────────────
+def load_users() -> dict:
+    """載入用戶偏好設定"""
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_users(data: dict):
+    """儲存用戶偏好設定"""
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_user_prefs(display_name: str) -> dict:
+    """取得用戶偏好，若無則回傳預設值"""
+    users = load_users()
+    return users.get(display_name, {"語言": "繁體中文", "自動翻譯": True})
+
+
+def set_user_pref(display_name: str, key: str, value):
+    """更新單一用戶偏好"""
+    users = load_users()
+    if display_name not in users:
+        users[display_name] = {"語言": "繁體中文", "自動翻譯": True}
+    users[display_name][key] = value
+    save_users(users)
+
+
+def build_user_system_prompt(display_name: str) -> str:
+    """根據用戶偏好建立個人化系統提示詞"""
+    prefs = get_user_prefs(display_name)
+    lang = prefs.get("語言", "繁體中文")
+    auto_translate = prefs.get("自動翻譯", True)
+
+    prompt = SYSTEM_PROMPT
+    if lang:
+        prompt += f"\n請一律使用「{lang}」回覆此用戶（{display_name}）。"
+    if auto_translate:
+        prompt += "\n若用戶以其他語言提問，仍以其偏好語言回覆，不需特別說明。"
+    return prompt
+
 
 # 股票清單
 STOCKS = {
@@ -69,7 +119,7 @@ pending_reminders: list = []
 
 
 # ── 工具函式 ──────────────────────────────────────────
-def get_ai_response(user_id: int, user_message: str, image_data: dict = None) -> str:
+def get_ai_response(user_id: int, user_message: str, image_data: dict = None, display_name: str = "") -> str:
     if user_id not in conversation_history:
         conversation_history[user_id] = []
 
@@ -91,10 +141,13 @@ def get_ai_response(user_id: int, user_message: str, image_data: dict = None) ->
     conversation_history[user_id].append({"role": "user", "content": content})
     recent = conversation_history[user_id][-10:]
 
+    # 根據用戶偏好選擇系統提示詞
+    system = build_user_system_prompt(display_name) if display_name else SYSTEM_PROMPT
+
     response = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1024,
-        system=SYSTEM_PROMPT,
+        system=system,
         messages=recent,
     )
     reply = response.content[0].text
@@ -300,7 +353,7 @@ async def on_message(message: discord.Message):
                         break
 
                 if clean or image_data:
-                    reply = get_ai_response(message.author.id, clean, image_data)
+                    reply = get_ai_response(message.author.id, clean, image_data, message.author.display_name)
                     for chunk in split_message(reply):
                         await message.reply(chunk)
             except Exception as e:
@@ -316,7 +369,7 @@ async def on_message(message: discord.Message):
 async def ask(interaction: discord.Interaction, 問題: str):
     await interaction.response.defer(thinking=True)
     try:
-        reply = get_ai_response(interaction.user.id, 問題)
+        reply = get_ai_response(interaction.user.id, 問題, display_name=interaction.user.display_name)
         chunks = split_message(reply)
         await interaction.followup.send(chunks[0])
         for c in chunks[1:]:
@@ -428,6 +481,44 @@ async def summary_cmd(interaction: discord.Interaction, 數量: int = 20):
             await interaction.channel.send(c)
     except Exception as e:
         await interaction.followup.send(f"❌ 摘要失敗：{e}")
+
+
+@bot.tree.command(name="profile", description="查看你的個人偏好設定")
+async def profile_cmd(interaction: discord.Interaction):
+    name = interaction.user.display_name
+    prefs = get_user_prefs(name)
+    lang = prefs.get("語言", "繁體中文")
+    auto_tr = "✅ 開啟" if prefs.get("自動翻譯", True) else "❌ 關閉"
+    await interaction.response.send_message(
+        f"👤 **{name} 的偏好設定**\n"
+        f"🌐 回覆語言：**{lang}**\n"
+        f"🔄 自動翻譯：**{auto_tr}**\n\n"
+        f"使用 `/setlang` 更改語言，`/autotranslate` 切換自動翻譯",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="setlang", description="設定 AI 回覆語言")
+@app_commands.describe(語言="偏好的回覆語言（例如：繁體中文、English、日本語）")
+async def setlang_cmd(interaction: discord.Interaction, 語言: str):
+    name = interaction.user.display_name
+    set_user_pref(name, "語言", 語言)
+    await interaction.response.send_message(
+        f"✅ 已將你的回覆語言設為：**{語言}**", ephemeral=True
+    )
+
+
+@bot.tree.command(name="autotranslate", description="切換自動翻譯（開/關）")
+async def autotranslate_cmd(interaction: discord.Interaction):
+    name = interaction.user.display_name
+    prefs = get_user_prefs(name)
+    current = prefs.get("自動翻譯", True)
+    new_val = not current
+    set_user_pref(name, "自動翻譯", new_val)
+    status = "✅ 已開啟" if new_val else "❌ 已關閉"
+    await interaction.response.send_message(
+        f"🔄 自動翻譯：**{status}**", ephemeral=True
+    )
 
 
 @bot.tree.command(name="keyword", description="查看關鍵字自動回覆清單")
