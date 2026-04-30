@@ -78,9 +78,9 @@ def build_user_system_prompt(display_name: str) -> str:
 
 # 股票清單
 STOCKS = {
-    "0056":  "元大高股息",
-    "00878": "國泰永續高股息",
-    "00916": "中信成長高股息",
+    "0056":   "元大高股息",
+    "00878":  "國泰永續高股息",
+    "009816": "中信成長高股息",
 }
 
 # 關鍵字自動回覆
@@ -159,6 +159,24 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
     return [text[i : i + limit] for i in range(0, len(text), limit)]
 
 
+def translate_titles_to_chinese(titles: list[str]) -> list[str]:
+    """使用 Claude 將標題批次翻譯成繁體中文"""
+    if not titles:
+        return titles
+    try:
+        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            system="你是專業翻譯員。將以下編號新聞標題翻譯成繁體中文，保持相同編號格式，只輸出翻譯結果，不加任何解釋或原文。",
+            messages=[{"role": "user", "content": numbered}],
+        )
+        lines = [re.sub(r"^\d+\.\s*", "", l.strip()) for l in resp.content[0].text.strip().split("\n") if l.strip()]
+        return lines if len(lines) == len(titles) else titles
+    except Exception:
+        return titles
+
+
 async def get_weather() -> str:
     try:
         async with aiohttp.ClientSession() as session:
@@ -227,7 +245,7 @@ async def get_stock_prices() -> str:
     return "💹 **台股行情**\n" + "\n".join(results)
 
 
-async def get_news(category: str = "綜合") -> str:
+async def get_news(category: str = "綜合", translate_intl: bool = False) -> str:
     tw_urls = {
         "綜合": "https://news.google.com/rss?hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
         "財經": "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtcFVHZ0pVVWlnQVAB?hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
@@ -246,13 +264,20 @@ async def get_news(category: str = "綜合") -> str:
             return re.sub(r"\s*[-–]\s*[^-–]+$", "", title).strip()
 
         tw_lines = [f"• {clean(e.title)}" for e in tw_feed.entries[:3]]
-        intl_lines = [f"• {clean(e.title)}" for e in intl_feed.entries[:3]]
+        raw_intl = [clean(e.title) for e in intl_feed.entries[:3]]
+
+        # 若開啟自動翻譯，將國際新聞英文標題翻譯成繁體中文
+        if translate_intl:
+            raw_intl = translate_titles_to_chinese(raw_intl)
+
+        intl_lines = [f"• {t}" for t in raw_intl]
         emoji = {"綜合": "📰", "財經": "💰", "科技": "💻"}.get(category, "📰")
 
+        intl_label = "🌍 國際（已翻譯）：" if translate_intl else "🌍 國際："
         return (
             f"{emoji} **{category}新聞**\n"
             f"🇹🇼 國內：\n" + "\n".join(tw_lines) + "\n"
-            f"🌍 國際：\n" + "\n".join(intl_lines)
+            + intl_label + "\n" + "\n".join(intl_lines)
         )
     except Exception as e:
         return f"❌ 新聞取得失敗：{e}"
@@ -265,9 +290,9 @@ async def build_morning_summary() -> str:
 
     weather = await get_weather()
     stocks = await get_stock_prices()
-    news_gen = await get_news("綜合")
-    news_fin = await get_news("財經")
-    news_tech = await get_news("科技")
+    news_gen = await get_news("綜合", translate_intl=True)
+    news_fin = await get_news("財經", translate_intl=True)
+    news_tech = await get_news("科技", translate_intl=True)
 
     return (
         f"🌅 **早安！今日晨報 {date_str}**\n"
@@ -384,7 +409,7 @@ async def weather_cmd(interaction: discord.Interaction):
     await interaction.followup.send(await get_weather())
 
 
-@bot.tree.command(name="stocks", description="查詢 0056、00878、00916 股票行情")
+@bot.tree.command(name="stocks", description="查詢 0056、00878、009816 股票行情")
 async def stocks_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     await interaction.followup.send(await get_stock_prices())
