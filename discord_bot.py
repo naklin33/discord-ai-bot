@@ -24,6 +24,15 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 SUMMARY_CHANNEL_ID = int(os.getenv("SUMMARY_CHANNEL_ID", "1498980534704017428"))
 WEATHER_CITY = os.getenv("WEATHER_CITY", "Kaohsiung")
 
+# Notion 整合
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
+NOTION_DB_ID  = os.getenv("NOTION_DB_ID", "32b3dd73-128c-4ca1-880f-00c896953656")
+
+# Google Calendar OAuth2
+GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
+
 # 台灣時區 UTC+8
 TAIWAN_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
@@ -75,11 +84,10 @@ def build_user_system_prompt(display_name: str) -> str:
         prompt += "\n若用戶以其他語言提問，仍以其偏好語言回覆，不需特別說明。"
     return prompt
 
-
 # 股票清單
 STOCKS = {
-    "0056":   "元大高股息",
-    "00878":  "國泰永續高股息",
+    "0056":  "元大高股息",
+    "00878": "國泰永續高股息",
     "009816": "中信成長高股息",
 }
 
@@ -266,21 +274,130 @@ async def get_news(category: str = "綜合", translate_intl: bool = False) -> st
         tw_lines = [f"• {clean(e.title)}" for e in tw_feed.entries[:3]]
         raw_intl = [clean(e.title) for e in intl_feed.entries[:3]]
 
-        # 若開啟自動翻譯，將國際新聞英文標題翻譯成繁體中文
         if translate_intl:
             raw_intl = translate_titles_to_chinese(raw_intl)
 
         intl_lines = [f"• {t}" for t in raw_intl]
         emoji = {"綜合": "📰", "財經": "💰", "科技": "💻"}.get(category, "📰")
 
-        intl_label = "🌍 國際（已翻譯）：" if translate_intl else "🌍 國際："
         return (
             f"{emoji} **{category}新聞**\n"
             f"🇹🇼 國內：\n" + "\n".join(tw_lines) + "\n"
-            + intl_label + "\n" + "\n".join(intl_lines)
+            f"🌍 國際（已翻譯）：\n" + "\n".join(intl_lines)
+            if translate_intl else
+            f"{emoji} **{category}新聞**\n"
+            f"🇹🇼 國內：\n" + "\n".join(tw_lines) + "\n"
+            f"🌍 國際：\n" + "\n".join(intl_lines)
         )
     except Exception as e:
         return f"❌ 新聞取得失敗：{e}"
+
+
+async def get_notion_todos() -> str:
+    """從 Notion 取得待處理 / 處理中的待辦事項"""
+    if not NOTION_TOKEN:
+        return ""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query",
+                headers={
+                    "Authorization": f"Bearer {NOTION_TOKEN}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "filter": {
+                        "or": [
+                            {"property": "狀態", "select": {"equals": "📌 待處理"}},
+                            {"property": "狀態", "select": {"equals": "🔄 處理中"}},
+                        ]
+                    },
+                    "sorts": [{"property": "截止日期", "direction": "ascending"}],
+                    "page_size": 10,
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+                results = data.get("results", [])
+                if not results:
+                    return "📝 **今日待辦 (Notion)**\n• 沒有待辦事項，今天辛苦了！🎉"
+                lines = []
+                for page in results:
+                    props = page.get("properties", {})
+                    title_rich = props.get("待辦事項", {}).get("title", [])
+                    title = title_rich[0]["plain_text"] if title_rich else "（無標題）"
+                    status_obj = props.get("狀態", {}).get("select") or {}
+                    status = status_obj.get("name", "")
+                    due_obj = props.get("截止日期", {}).get("date") or {}
+                    due_str = f"  ⏰ {due_obj['start']}" if due_obj.get("start") else ""
+                    lines.append(f"• {status} {title}{due_str}")
+                return "📝 **今日待辦 (Notion)**\n" + "\n".join(lines)
+    except Exception as e:
+        return f"📝 **今日待辦 (Notion)**\n• 取得失敗：{e}"
+
+
+async def _refresh_google_token() -> str:
+    """用 refresh_token 換取 access_token"""
+    if not all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN]):
+        return ""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "refresh_token": GOOGLE_REFRESH_TOKEN,
+                    "grant_type": "refresh_token",
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+                return data.get("access_token", "")
+    except Exception:
+        return ""
+
+
+async def get_calendar_events() -> str:
+    """從 Google Calendar 取得今日行程"""
+    access_token = await _refresh_google_token()
+    if not access_token:
+        return ""
+    try:
+        now = datetime.datetime.now(TAIWAN_TZ)
+        time_min = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        time_max = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={
+                    "timeMin": time_min,
+                    "timeMax": time_max,
+                    "orderBy": "startTime",
+                    "singleEvents": "true",
+                    "timeZone": "Asia/Taipei",
+                    "maxResults": "15",
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+                events = data.get("items", [])
+                if not events:
+                    return "📅 **今日行程 (Google Calendar)**\n• 今天沒有行程，放鬆一下！😊"
+                lines = []
+                for e in events:
+                    title = e.get("summary", "（無標題）")
+                    start = e.get("start", {})
+                    if "dateTime" in start:
+                        dt = datetime.datetime.fromisoformat(start["dateTime"])
+                        lines.append(f"• {dt.strftime('%H:%M')} {title}")
+                    else:
+                        lines.append(f"• 📆 {title}（全天）")
+                return "📅 **今日行程 (Google Calendar)**\n" + "\n".join(lines)
+    except Exception as e:
+        return f"📅 **今日行程 (Google Calendar)**\n• 取得失敗：{e}"
 
 
 async def build_morning_summary() -> str:
@@ -288,22 +405,42 @@ async def build_morning_summary() -> str:
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     date_str = f"{now.strftime('%Y/%m/%d')} {weekdays[now.weekday()]}"
 
-    weather = await get_weather()
-    stocks = await get_stock_prices()
-    news_gen = await get_news("綜合", translate_intl=True)
-    news_fin = await get_news("財經", translate_intl=True)
-    news_tech = await get_news("科技", translate_intl=True)
-
-    return (
-        f"🌅 **早安！今日晨報 {date_str}**\n"
-        f"{'─'*32}\n\n"
-        f"{weather}\n\n{'─'*32}\n\n"
-        f"{stocks}\n\n{'─'*32}\n\n"
-        f"{news_gen}\n\n{'─'*32}\n\n"
-        f"{news_fin}\n\n{'─'*32}\n\n"
-        f"{news_tech}\n\n{'─'*32}\n"
-        f"Have a productive day! 💪✨"
+    # 並行取得所有資料，加速晨報生成
+    import asyncio
+    (
+        weather,
+        stocks,
+        news_gen,
+        news_fin,
+        news_tech,
+        notion_todos,
+        calendar_events,
+    ) = await asyncio.gather(
+        get_weather(),
+        get_stock_prices(),
+        get_news("綜合", translate_intl=True),
+        get_news("財經", translate_intl=True),
+        get_news("科技", translate_intl=True),
+        get_notion_todos(),
+        get_calendar_events(),
     )
+
+    divider = f"\n{'─'*32}\n\n"
+    sections = [
+        f"🌅 **早安！今日晨報 {date_str}**\n{'─'*32}\n",
+        weather,
+        stocks,
+    ]
+
+    # 加入行程與待辦（如有設定就顯示）
+    if calendar_events:
+        sections.append(calendar_events)
+    if notion_todos:
+        sections.append(notion_todos)
+
+    sections += [news_gen, news_fin, news_tech]
+
+    return divider.join(sections) + f"\n{'─'*32}\nHave a productive day! 💪✨"
 
 
 # ── 排程任務 ──────────────────────────────────────────
