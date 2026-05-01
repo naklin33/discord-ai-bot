@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  discord-bot:
+    build: .
+    container_name: discord-ai-bot
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Taipei
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SUMMARY_CHANNEL_ID=${SUMMARY_CHANNEL_ID}
+      - NOTION_TOKEN=${NOTION_TOKEN}
+      - NOTION_DB_ID=${NOTION_DB_ID}
+      - GCAL_ICAL_URL=${GCAL_ICAL_URL}
+      - WEATHER_CITY=${WEATHER_CITY}
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
