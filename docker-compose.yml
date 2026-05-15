@@ -39,7 +39,7 @@ services:
       - WEATHER_CITY=${WEATHER_CITY}
       - NOTION_TOKEN=${NOTION_TOKEN}
       - INVENTORY_NOTION_DB_ID=${INVENTORY_NOTION_DB_ID}
-      - INVENTORY_NAME_PROP=${INVENTORY_NAME_PROP:-品名}
+      - INVENTORY_NAME_PROP=${INVENTORY_NAME_PROP:-品項名稱}
       - INVENTORY_STOCK_PROP=${INVENTORY_STOCK_PROP:-庫存}
     ports:
       - "8080:8080"
@@ -50,3 +50,17 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Cloudflare Tunnel：把 line-bot:8080 暴露成 HTTPS，給 Line webhook 用
+  # 設定方式：Cloudflare Zero Trust → Tunnels → Create → 複製 token 到 .env
+  # Public hostname 指向 http://line-bot:8080
+  # 若沒填 token，這個 service 不會啟動（用 profile gating）
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - line-bot
+    profiles:
+      - tunnel

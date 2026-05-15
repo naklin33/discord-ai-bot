@@ -9,7 +9,7 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
 INVENTORY_DB_ID = os.getenv("INVENTORY_NOTION_DB_ID", "")
 
 # Notion 屬性名稱（可在 .env 覆寫，預設值為一般中文命名）
-NAME_PROP = os.getenv("INVENTORY_NAME_PROP", "品名")
+NAME_PROP = os.getenv("INVENTORY_NAME_PROP", "品項名稱")
 STOCK_PROP = os.getenv("INVENTORY_STOCK_PROP", "庫存")
 
 _NOTION_VERSION = "2022-06-28"
