@@ -5,8 +5,10 @@ services:
     build: .
     container_name: discord-ai-bot
     restart: unless-stopped
+    command: ["python", "-u", "discord_bot.py"]
     environment:
       - TZ=Asia/Taipei
+      - BOT_DB_PATH=/app/data/bot.db
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - SUMMARY_CHANNEL_ID=${SUMMARY_CHANNEL_ID}
@@ -14,6 +16,29 @@ services:
       - NOTION_DB_ID=${NOTION_DB_ID}
       - GCAL_ICAL_URL=${GCAL_ICAL_URL}
       - WEATHER_CITY=${WEATHER_CITY}
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  line-bot:
+    build: .
+    container_name: line-ai-bot
+    restart: unless-stopped
+    command: ["python", "-u", "line_bot.py"]
+    environment:
+      - TZ=Asia/Taipei
+      - BOT_DB_PATH=/app/data/bot.db
+      - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
+      - LINE_PORT=8080
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - WEATHER_CITY=${WEATHER_CITY}
+    ports:
+      - "8080:8080"
     volumes:
       - ./data:/app/data
     logging:

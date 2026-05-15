@@ -15,11 +15,13 @@ import feedparser
 import datetime
 import base64
 import re
-import json
 import pytz
 from icalendar import Calendar
 
+from shared import storage, users as user_store, stats
+
 load_dotenv()
+storage.init_db()
 
 # ── 設定 ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -37,44 +39,9 @@ GCAL_ICAL_URL = os.getenv("GCAL_ICAL_URL", "")
 # 台灣時區 UTC+8
 TAIWAN_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
-# 用戶偏好檔案
-USERS_FILE = "users.json"
-
-
-# ── 用戶偏好管理 ──────────────────────────────────────
-def load_users() -> dict:
-    """載入用戶偏好設定"""
-    try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_users(data: dict):
-    """儲存用戶偏好設定"""
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def get_user_prefs(display_name: str) -> dict:
-    """取得用戶偏好，若無則回傳預設值"""
-    users = load_users()
-    return users.get(display_name, {"語言": "繁體中文", "自動翻譯": True})
-
-
-def set_user_pref(display_name: str, key: str, value):
-    """更新單一用戶偏好"""
-    users = load_users()
-    if display_name not in users:
-        users[display_name] = {"語言": "繁體中文", "自動翻譯": True}
-    users[display_name][key] = value
-    save_users(users)
-
-
 def build_user_system_prompt(display_name: str) -> str:
     """根據用戶偏好建立個人化系統提示詞"""
-    prefs = get_user_prefs(display_name)
+    prefs = user_store.get_user_prefs(display_name)
     lang = prefs.get("語言", "繁體中文")
     auto_translate = prefs.get("自動翻譯", True)
 
@@ -500,6 +467,11 @@ async def on_message(message: discord.Message):
                         break
 
                 if clean or image_data:
+                    stats.log_usage(
+                        "discord", message.author.id, "mention",
+                        message.author.display_name,
+                        {"has_image": bool(image_data)},
+                    )
                     reply = get_ai_response(message.author.id, clean, image_data, message.author.display_name)
                     for chunk in split_message(reply):
                         await message.reply(chunk)
@@ -515,6 +487,7 @@ async def on_message(message: discord.Message):
 @app_commands.describe(問題="你想問什麼？")
 async def ask(interaction: discord.Interaction, 問題: str):
     await interaction.response.defer(thinking=True)
+    stats.log_usage("discord", interaction.user.id, "ask", interaction.user.display_name)
     try:
         reply = get_ai_response(interaction.user.id, 問題, display_name=interaction.user.display_name)
         chunks = split_message(reply)
@@ -528,12 +501,14 @@ async def ask(interaction: discord.Interaction, 問題: str):
 @bot.tree.command(name="weather", description="查詢高雄即時天氣與三日預報")
 async def weather_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
+    stats.log_usage("discord", interaction.user.id, "weather", interaction.user.display_name)
     await interaction.followup.send(await get_weather())
 
 
 @bot.tree.command(name="stocks", description="查詢 0056、00878、009816 股票行情")
 async def stocks_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
+    stats.log_usage("discord", interaction.user.id, "stocks", interaction.user.display_name)
     await interaction.followup.send(await get_stock_prices())
 
 
@@ -548,12 +523,14 @@ async def stocks_cmd(interaction: discord.Interaction):
 )
 async def news_cmd(interaction: discord.Interaction, 類別: str = "綜合"):
     await interaction.response.defer(thinking=True)
+    stats.log_usage("discord", interaction.user.id, "news", interaction.user.display_name, {"類別": 類別})
     await interaction.followup.send(await get_news(類別))
 
 
 @bot.tree.command(name="morning", description="立即取得今日晨報（天氣＋股票＋新聞）")
 async def morning_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
+    stats.log_usage("discord", interaction.user.id, "morning", interaction.user.display_name)
     summary = await build_morning_summary()
     chunks = split_message(summary)
     await interaction.followup.send(chunks[0])
@@ -565,6 +542,7 @@ async def morning_cmd(interaction: discord.Interaction):
 @app_commands.describe(文字="要翻譯的文字", 語言="目標語言（預設英文）")
 async def translate_cmd(interaction: discord.Interaction, 文字: str, 語言: str = "英文"):
     await interaction.response.defer(thinking=True)
+    stats.log_usage("discord", interaction.user.id, "translate", interaction.user.display_name, {"語言": 語言})
     try:
         resp = claude.messages.create(
             model="claude-sonnet-4-6",
@@ -580,6 +558,7 @@ async def translate_cmd(interaction: discord.Interaction, 文字: str, 語言: s
 @bot.tree.command(name="remind", description="設定倒數提醒")
 @app_commands.describe(分鐘="幾分鐘後提醒", 內容="提醒內容")
 async def remind_cmd(interaction: discord.Interaction, 分鐘: int, 內容: str):
+    stats.log_usage("discord", interaction.user.id, "remind", interaction.user.display_name, {"分鐘": 分鐘})
     t = datetime.datetime.now(TAIWAN_TZ) + datetime.timedelta(minutes=分鐘)
     pending_reminders.append({
         "time": t,
@@ -605,6 +584,7 @@ async def clear_cmd(interaction: discord.Interaction):
 @app_commands.describe(數量="訊息數量（預設 20，最多 50）")
 async def summary_cmd(interaction: discord.Interaction, 數量: int = 20):
     await interaction.response.defer(thinking=True)
+    stats.log_usage("discord", interaction.user.id, "summary", interaction.user.display_name, {"數量": 數量})
     數量 = min(數量, 50)
     try:
         msgs = []
@@ -633,7 +613,7 @@ async def summary_cmd(interaction: discord.Interaction, 數量: int = 20):
 @bot.tree.command(name="profile", description="查看你的個人偏好設定")
 async def profile_cmd(interaction: discord.Interaction):
     name = interaction.user.display_name
-    prefs = get_user_prefs(name)
+    prefs = user_store.get_user_prefs(name)
     lang = prefs.get("語言", "繁體中文")
     auto_tr = "✅ 開啟" if prefs.get("自動翻譯", True) else "❌ 關閉"
     await interaction.response.send_message(
@@ -649,7 +629,7 @@ async def profile_cmd(interaction: discord.Interaction):
 @app_commands.describe(語言="偏好的回覆語言（例如：繁體中文、English、日本語）")
 async def setlang_cmd(interaction: discord.Interaction, 語言: str):
     name = interaction.user.display_name
-    set_user_pref(name, "語言", 語言)
+    user_store.set_user_pref(name, "語言", 語言)
     await interaction.response.send_message(
         f"✅ 已將你的回覆語言設為：**{語言}**", ephemeral=True
     )
@@ -658,13 +638,22 @@ async def setlang_cmd(interaction: discord.Interaction, 語言: str):
 @bot.tree.command(name="autotranslate", description="切換自動翻譯（開/關）")
 async def autotranslate_cmd(interaction: discord.Interaction):
     name = interaction.user.display_name
-    prefs = get_user_prefs(name)
+    prefs = user_store.get_user_prefs(name)
     current = prefs.get("自動翻譯", True)
     new_val = not current
-    set_user_pref(name, "自動翻譯", new_val)
+    user_store.set_user_pref(name, "自動翻譯", new_val)
     status = "✅ 已開啟" if new_val else "❌ 已關閉"
     await interaction.response.send_message(
         f"🔄 自動翻譯：**{status}**", ephemeral=True
+    )
+
+
+@bot.tree.command(name="stats", description="查看你的跨平台使用統計（Discord + Line）")
+async def stats_cmd(interaction: discord.Interaction):
+    name = interaction.user.display_name
+    summary = stats.user_summary(display_name=name)
+    await interaction.response.send_message(
+        stats.format_summary(summary, name), ephemeral=True
     )
 
 
