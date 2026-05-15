@@ -20,7 +20,7 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-from shared import storage, users as user_store, stats
+from shared import storage, users as user_store, stats, inventory
 
 load_dotenv()
 storage.init_db()
@@ -87,12 +87,13 @@ COMMAND_HELP = (
     "/新聞 [綜合|財經|科技]\n"
     "/晨報 - 今日晨報\n"
     "/翻譯 <文字> | <語言>\n"
+    "/庫存 <關鍵字> - 查 Notion 庫存\n"
     "/設定語言 <語言>\n"
     "/自動翻譯 - 切換開關\n"
     "/個人 - 查看偏好\n"
     "/統計 - 跨平台使用統計\n"
     "/清除 - 清除對話記憶\n"
-    "其他訊息會直接交給 AI 回答。"
+    "直接輸入產品名也會自動查庫存（例如「一生紅」），其他訊息交給 AI。"
 )
 
 
@@ -163,7 +164,24 @@ def handle_command(user_key: str, display_name: str, text: str) -> str | None:
         )
         return f"🌐 → {lang}\n{resp.content[0].text}"
 
+    if t.startswith("/庫存"):
+        kw = t.replace("/庫存", "", 1).strip()
+        if not kw:
+            return "用法：/庫存 一生紅"
+        return asyncio.run(inventory.search(kw))
+
     return None
+
+
+def try_inventory_keyword(text: str) -> str | None:
+    """非指令訊息：先看有沒有命中產品名，命中就直接查庫存"""
+    try:
+        keyword = asyncio.run(inventory.detect_keyword(text))
+    except Exception:
+        return None
+    if not keyword:
+        return None
+    return asyncio.run(inventory.search(keyword))
 
 
 # ── 對應 discord_bot 的網路函式（簡化版）────────────────
@@ -302,11 +320,16 @@ def on_message(event: MessageEvent):
             stats.log_usage("line", user_id, command_name, display_name)
             reply_text = cmd_reply
         else:
-            stats.log_usage("line", user_id, "mention", display_name)
-            try:
-                reply_text = ai_reply(user_id, display_name, text)
-            except Exception as e:
-                reply_text = f"❌ 錯誤：{e}"
+            inv_reply = try_inventory_keyword(text)
+            if inv_reply is not None:
+                stats.log_usage("line", user_id, "inventory_auto", display_name)
+                reply_text = inv_reply
+            else:
+                stats.log_usage("line", user_id, "mention", display_name)
+                try:
+                    reply_text = ai_reply(user_id, display_name, text)
+                except Exception as e:
+                    reply_text = f"❌ 錯誤：{e}"
 
         # Line 單則訊息上限 5000 字
         api.reply_message(
